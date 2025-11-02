@@ -9,7 +9,8 @@
 #define WATER_LEVEL_HIGH_MM       150 // mm from bottom
 #define MOTOR_RUNNING_SEC           3  // cover motor running time
 
-
+int ir_sensor ;
+int pir_sensor;
 /* ---------------- Global Inputs (mocked each step) ------------------ */
 int g_light_sensor = 0;      // 0 dark, 1 light
 int g_seat = 0;               // 0 empty, 1 occupied
@@ -22,6 +23,7 @@ int g_usage_confirmed = 0;    // became 1 when seat_time >= threshold
 int g_flush_delay = 0;        // countdown for auto flush
 int g_cover_cooldown = 0;     // cover rotation rate-limit
 int g_prev_hand_motion = 0;   // edge detection for motion
+int g_cover_state=0;        //0:closed,1:open
 
 ///* ---------------- Peripheral Register ------------- */
 typedef struct{
@@ -146,7 +148,8 @@ static inline void start_or_retrigger_cover(void){
 static inline void check_led_timeout_and_turn_off(void){
   if (TIM6->SR & 1u){                 
     TIM6->SR = 0;
-    GPIOA->ODR &= ~(1 << LED_OUTPUT_PIN);      
+    GPIOA->ODR &= ~(1 << LED_OUTPUT_PIN);    
+    g_light_time=0;  
   }
 }
 
@@ -154,6 +157,7 @@ static inline void check_cover_timeout_and_turn_off(void){
   if (TIM7->SR & 1u){                 
     TIM7->SR = 0;
     GPIOA->ODR &= ~(1 << COVER_OUTPUT_PIN);     
+    g_cover_state=0;
   }
 }
 int main(void) {
@@ -163,17 +167,27 @@ int main(void) {
     light_timer_initialize();
     cover_motor_timer_initialize();
 
+
     
 
     while(1){
-        if (GPIOA->IDR & (1u<< LED_INPUT_PIN)) {
+        if ((GPIOA->IDR & (1u<< LED_INPUT_PIN))!=0&& g_light_time==0) {
             start_or_retrigger_led();
+            g_light_time=1;
         }
-        if (GPIOA->IDR & (1u<<COVER_INPUT_PIN)){
+        if ((GPIOA->IDR & (1u<<COVER_INPUT_PIN))==0&& g_cover_state==0){
             start_or_retrigger_cover();
+            g_cover_state=1;
         }
-        check_led_timeout_and_turn_off();
-        check_cover_timeout_and_turn_off();
+        if (g_light_time==1)
+        {
+            check_led_timeout_and_turn_off();
+        }
+        if(g_cover_state==1)
+        {
+            check_cover_timeout_and_turn_off();
+        }
+
     }
     //for (int t = 0; t < 11; ++t) {
     //    printf("\n--- Step %d ---\n", t);
