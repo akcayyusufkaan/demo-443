@@ -1,6 +1,16 @@
 #include <stdint.h>
 #include <stdio.h>
+/*[PI1] Smart Toilet – Motion Lighting & Cover Motor (GPIO + Timers)
+    Implements the core MVP:
+      - Motion-based light (PA5->input, PA6->LED output) with timed auto-off
+      - Handwave-based cover motor trigger (PA11->input, PA12->motor output)
+      - Motor runtime timing + cooldown timing using TIM6/TIM7
 
+    Refactoring notes:
+      - Split HW init into small functions (GPIO init, TIM init)
+      - Introduced small inline helpers to hide register dancing
+      - Centralized tunables via #define to keep PI1 timing consistent
+*/
 /* ---------------- System Parameters (tunable, mock) ---------------- */
 #define LED_ON_SEC                 15 //
 #define OCCUPIED_THRESHOLD_SEC     10  // seconds seated to confirm usage
@@ -129,6 +139,7 @@ void cover_motor_timer_initialize(void) {
 
 
 static inline void start_or_retrigger_led(void){
+    // Ensure TIM6 period matches LED ON time before starting
     TIM6->CNT = 0;
     TIM6->SR  = 0;
     GPIOA->ODR |= (1 << LED_OUTPUT_PIN);
@@ -144,6 +155,7 @@ static inline void start_cover(void){
 
 
 static inline void check_led_timeout_and_turn_off(void){
+  // Check if LED timer has expired
   if (TIM6->SR & 1u){
     TIM6->SR = 0;
     GPIOA->ODR &= ~(1 << LED_OUTPUT_PIN);
@@ -152,6 +164,7 @@ static inline void check_led_timeout_and_turn_off(void){
 }
 
 static inline void check_cover_timeout_and_turn_off(void){
+    // Check if cover motor timer has expired
   if (TIM7->SR & 1u){
     TIM7->SR = 0;
     // Motor period elapsed -> stop motor and start cooldown
@@ -165,6 +178,7 @@ static inline void check_cover_timeout_and_turn_off(void){
   }
 }
 static inline void check_cover_cooldown(void){
+    // Check if cooldown timer has expired
     if (TIM7->SR & 1u){
         TIM7->SR = 0;
         g_cover_cooldown = 0;
@@ -183,24 +197,29 @@ int main(void) {
 
 
     while(1){
+            // Light sensor detection
         if ((GPIOA->IDR & (1u<< LED_INPUT_PIN))!=0) {
             start_or_retrigger_led();
             g_light_time=1;
             g_light_sensor=1;
         }
+        // Hand motion detection
         if ((GPIOA->IDR & (1u<<COVER_INPUT_PIN))==0 && g_cover_state==0 && g_cover_cooldown==0){
             start_cover();
             g_cover_state=1;
         }
+        // Timer checks
         if (g_light_time==1)
         {
             g_light_sensor=0;
             check_led_timeout_and_turn_off();
         }
+        // Cover state checks
         if  (g_cover_state==1)
         {
             check_cover_timeout_and_turn_off();
         }
+        // Cover cooldown checks
         if(g_cover_state==0 && g_cover_cooldown>0)
         {
             check_cover_cooldown();
