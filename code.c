@@ -2,15 +2,13 @@
 #include <stdio.h>
 
 /* ---------------- System Parameters (tunable, mock) ---------------- */
-#define LED_ON_SEC                 15 // 
+#define LED_ON_SEC                 15 //
 #define OCCUPIED_THRESHOLD_SEC     10  // seconds seated to confirm usage
 #define AUTO_FLUSH_DELAY_SEC        5  // delay after standing up (auto flush)
-#define COVER_COOLDOWN_SEC          8  // MIN time between cover rotations
+#define COVER_COOLDOWN_SEC          7  // MIN time between cover rotations
 #define WATER_LEVEL_HIGH_MM       150 // mm from bottom
 #define MOTOR_RUNNING_SEC           3  // cover motor running time
 
-int ir_sensor ;
-int pir_sensor;
 /* ---------------- Global Inputs (mocked each step) ------------------ */
 int g_light_sensor = 0;      // 0 dark, 1 light
 int g_seat = 0;               // 0 empty, 1 occupied
@@ -93,11 +91,9 @@ int calculate_flush_delay_seconds(int usage_confirmed) {
 
 /* ---------------- Timer “updates” (prints only in mock) ------------- */
 void update_timer_flush_delay(int s)   { if (s>0) printf("Timer(FlushDelay) %ds\n", s); }
-void update_timer_cover_cooldown(int s){ if (s>0) printf("Timer(CoverCD) %ds\n", s); }
 
 /* ---------------- Actuators (prints only in mock) ------------------- */
 void actuate_flush(void)   { printf("** FLUSH **\n"); }
-void actuate_cover(void)   { printf("** ROTATE COVER **\n"); }
 
 
 void motion_sensor_initialize(void) {
@@ -134,31 +130,46 @@ void cover_motor_timer_initialize(void) {
 
 static inline void start_or_retrigger_led(void){
     TIM6->CNT = 0;
-    TIM6->SR  = 0;            
+    TIM6->SR  = 0;
     GPIOA->ODR |= (1 << LED_OUTPUT_PIN);
 }
 
-static inline void start_or_retrigger_cover(void){
+static inline void start_cover(void){
+    // Ensure TIM7 period matches motor runtime before starting
+    TIM7->ARR = (1000*MOTOR_RUNNING_SEC-1);
     TIM7->CNT = 0;
-    TIM7->SR  = 0;                 
+    TIM7->SR  = 0;
     GPIOA->ODR |= (1 << COVER_OUTPUT_PIN);
 }
 
 
 static inline void check_led_timeout_and_turn_off(void){
-  if (TIM6->SR & 1u){                 
+  if (TIM6->SR & 1u){
     TIM6->SR = 0;
-    GPIOA->ODR &= ~(1 << LED_OUTPUT_PIN);    
-    g_light_time=0;  
+    GPIOA->ODR &= ~(1 << LED_OUTPUT_PIN);
+    g_light_time=0;
   }
 }
 
 static inline void check_cover_timeout_and_turn_off(void){
-  if (TIM7->SR & 1u){                 
+  if (TIM7->SR & 1u){
     TIM7->SR = 0;
-    GPIOA->ODR &= ~(1 << COVER_OUTPUT_PIN);     
+    // Motor period elapsed -> stop motor and start cooldown
+    GPIOA->ODR &= ~(1 << COVER_OUTPUT_PIN);
+    g_cover_cooldown = COVER_COOLDOWN_SEC;
+    
+    // Reconfigure TIM7 to 1s tick for cooldown countdown
+    TIM7->ARR = (1000*g_cover_cooldown-1);
+    TIM7->CNT = 0;
     g_cover_state=0;
   }
+}
+static inline void check_cover_cooldown(void){
+    if (TIM7->SR & 1u){
+        TIM7->SR = 0;
+        g_cover_cooldown = 0;
+
+        }
 }
 int main(void) {
     printf("Conceptual Design – Smart Toilet (no manual button)\n");
@@ -167,25 +178,32 @@ int main(void) {
     light_timer_initialize();
     cover_motor_timer_initialize();
 
+    g_cover_cooldown=0;
 
-    
+
 
     while(1){
-        if ((GPIOA->IDR & (1u<< LED_INPUT_PIN))!=0&& g_light_time==0) {
+        if ((GPIOA->IDR & (1u<< LED_INPUT_PIN))!=0) {
             start_or_retrigger_led();
             g_light_time=1;
+            g_light_sensor=1;
         }
-        if ((GPIOA->IDR & (1u<<COVER_INPUT_PIN))==0&& g_cover_state==0){
-            start_or_retrigger_cover();
+        if ((GPIOA->IDR & (1u<<COVER_INPUT_PIN))==0 && g_cover_state==0 && g_cover_cooldown==0){
+            start_cover();
             g_cover_state=1;
         }
         if (g_light_time==1)
         {
+            g_light_sensor=0;
             check_led_timeout_and_turn_off();
         }
-        if(g_cover_state==1)
+        if  (g_cover_state==1)
         {
             check_cover_timeout_and_turn_off();
+        }
+        if(g_cover_state==0 && g_cover_cooldown>0)
+        {
+            check_cover_cooldown();
         }
 
     }
