@@ -2,7 +2,6 @@
 
 // ===================== System Parameters =====================
 #define OCCUPIED_THRESHOLD_SEC      2  // seconds seated to confirm usage
-#define SECOND_LED_DELAY_SEC        4  // (not used yet)
 #define AUTO_FLUSH_DELAY_SEC        4  // delay AFTER valid sit & stand-up before servo starts
 
 // IR / LED pins
@@ -401,8 +400,8 @@ void TIM2_IRQHandler(void)
         }
     }
 
-    // Update Interrupt Flag (not strictly needed but kept clean)
-    if (TIM2->SR & (1u << 0)) {      // UIF
+    // Update Interrupt Flag
+    if (TIM2->SR & (1u << 0)) { // UIF
         TIM2->SR &= ~(1u << 0);
     }
 }
