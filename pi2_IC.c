@@ -1,6 +1,6 @@
 #include <stdint.h>
 
-/* ---------------- System Parameters ---------------- */
+// System Parameters
 #define OCCUPIED_THRESHOLD_SEC      2  // seconds seated to confirm usage
 #define SECOND_LED_DELAY_SEC        4  // delay after standing up (not used yet)
 
@@ -8,7 +8,7 @@
 #define RED_LED_PIN    9  // PA9
 #define BLUE_LED_PIN   7  // PB7
 
-/* ---------------- GPIO Structure ---------------- */
+// GPIO Structure
 typedef struct {
     volatile uint32_t MODER;
     volatile uint32_t OTYPER;
@@ -25,7 +25,7 @@ typedef struct {
     volatile uint32_t SECCFGR;
 } GPIO;
 
-/* ---------------- TIM15 Structure (from reference) ---------------- */
+// TIM15 Structure (from reference)
 typedef struct {
     volatile uint32_t CR1;        // 0x00
     volatile uint32_t CR2;        // 0x04
@@ -52,14 +52,17 @@ typedef struct {
 } TIM15_General_Purpose_Type;
 
 // Base addresses
-#define RCC_AHB2ENR   (*(volatile uint32_t *) 0x4002104C)
-#define RCC_APB2ENR   (*(volatile uint32_t *) 0x40021060)
+#define RCC_AHB2ENR   (*(volatile uint32_t *) 0x4002104C) // for GPIOA/B/C... clocks enable
+#define RCC_APB2ENR   (*(volatile uint32_t *) 0x40021060) // for TIM15... clocks enable
 
 #define GPIOA ((GPIO *) 0x42020000)
 #define GPIOB ((GPIO *) 0x42020400)
 
 #define TIM15 ((TIM15_General_Purpose_Type *) 0x40014000)
-#define ISER2         (*(volatile uint32_t *) 0xE000E108)  // NVIC ISER2
+
+#define ISER2         (*(volatile uint32_t *) 0xE000E108)  // NVIC ISER2 -> IRQ 64..95
+#define TIM15_IRQN                   69        // TIM15 global interrupt = IRQ 69
+#define TIM15_IRQ_BIT  (TIM15_IRQN - 64)       // 5
 
 // Global IC state
 static uint8_t  is_sitting         = 0; // 0: nobody sitting, 1: someone sitting
@@ -93,6 +96,7 @@ void TIM15_setup(void)
     TIM15->PSC = 3999; // 4 MHz / (3999 + 1) = 1 kHz -> 1 ms per tick.
     TIM15->ARR = 0xFFFF; // ~65 s max ölçüm aralığı
 
+    // ===== CHANNEL 1 CONFIGURATION =====
     // 1. Set CH1 as input, mapped on TI1
     TIM15->CCMR1 &= ~(3u << 0); // Clear CC1S bits
     TIM15->CCMR1 |=  (1u << 0); // CC1S = 01: Channel 1 is input, IC1 is mapped on TI1.
@@ -101,28 +105,28 @@ void TIM15_setup(void)
     TIM15->CCER &= ~(0xFu); // Clear CC1P, CC1E
     TIM15->CCER |=  0b1011; // CC1P=10, CC1E=11 -> both edges
 
-    // 3. Enable Interrupts
-    TIM15->DIER |= (1u << 1); // CC1IE : Enable Capture/Compare 1 interrupt
+    // 3. Enable Interrupts for CH1
+    TIM15->DIER |= (1u << 1); // Enable CC1IE: Capture/Compare Channel 1 interrupt
 
     TIM15->SR = 0; // Clear all SR flags
 
-    // 4. Enable TIM15 interrupt in NVIC
-    ISER2 |= (1u << 5); // Enable IRQ 69
+    // Enable TIM15 interrupt in NVIC
+    ISER2 |= (1u << TIM15_IRQ_BIT); // Enable IRQ 69
 
-    // 5. Start the counter
+    // Start the counter
     TIM15->CR1 |= 1u;  // CEN = 1
 }
 
-/* ---------------- LED Control Functions ---------------- */
+// LED Control Functions
 void turn_on_RED(void) { GPIOA->ODR |= (1 << RED_LED_PIN); }
 void turn_off_RED(void) { GPIOA->ODR &= ~(1 << RED_LED_PIN); }
 void turn_on_BLUE(void) { GPIOB->ODR |= (1 << BLUE_LED_PIN); }
 void turn_off_BLUE(void) { GPIOB->ODR &= ~(1 << BLUE_LED_PIN); }
 
-/* ---------------- TIM15 IRQ ---------------- */
+// TIM15 Interrupt Handler
 void TIM15_IRQHandler(void)
 {
-    // Check for Input Capture 1 interrupt
+    // Check for Input Capture Channel 1 interrupt
     if (TIM15->SR & (1u << 1)) { // SR -> CC1IF
 
         TIM15->SR &= ~(1u << 1); // Clear the flag SR -> CC1IF
@@ -137,8 +141,8 @@ void TIM15_IRQHandler(void)
                 is_sitting   = 1; // Update state
                 sit_start_time_ms = captured_time_ms;
 
-                //turn_off_RED();
-                //turn_off_BLUE();
+                turn_off_RED();
+                turn_off_BLUE();
             }
             // else -> No action because already sitting, this edge is bounce
         }
@@ -162,7 +166,7 @@ void TIM15_IRQHandler(void)
                     turn_on_BLUE();
                 } else {
                     // Temporary contact, not a valid sit
-                    // turn_off_BLUE();
+                    turn_off_BLUE();
                 }
             }
             // else -> No action because already empty, this edge is bounce
@@ -170,7 +174,8 @@ void TIM15_IRQHandler(void)
     }
 
     // Check for Overcapture Event
-    if (TIM15->SR & (1u << 9)) { // SR -> CC1OF
+    if (TIM15->SR & (1u << 9)) // SR -> CC1OF
+    {
         TIM15->SR &= ~(1u << 9); // Clear the flag SR -> CC1OF
         // Reset state for safety
         is_sitting = 0;
@@ -194,4 +199,5 @@ int main(void)
     while (1) {
         __asm volatile ("wfi");
     }
+    return 0;
 }
