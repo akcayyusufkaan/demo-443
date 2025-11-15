@@ -1,3 +1,70 @@
+/*
+ * Input Capture (TIM15 CH1 - PA2, IR sensor)
+ * ------------------------------------------------
+ * - PA2 is configured as Alternate Function AF14 -> TIM15_CH1.
+ * - TIM15 Channel 1 is configured as Input Capture on TI1:
+ *      * CC1S = 01 (input, mapped on TI1)
+ *      * CC1P/CC1NP configured for both-edge capture (falling + rising)
+ * - CC1 interrupt is enabled (CC1IE in DIER) and handled in TIM15_IRQHandler.
+ * - On each edge, TIM15->CCR1 is read as a hardware timestamp in milliseconds:
+ *      * Falling edge (IR LOW)  = "sit" event   -> sit_start_time_ms = CCR1
+ *      * Rising  edge (IR HIGH) = "stand" event -> sit_end_time_ms   = CCR1
+ * - The sitting duration is computed from two CCR1 timestamps:
+ *      * elapsed_ms = sit_end_time_ms - sit_start_time_ms
+ *        (with explicit handling of timer overflow using TIM15->ARR).
+ * - This elapsed_ms value is compared against OCCUPIED_THRESHOLD_MS to
+ *   decide whether the seat was truly occupied or just a short contact.
+ *
+ * Output Compare And PWM (TIM2 CH1 + CH2, Servo motor)
+ * ------------------------------------------------
+ * 1) TIM2_CH1 -> Servo PWM signal on PA0
+ *    - PA0 is configured as Alternate Function AF1 -> TIM2_CH1.
+ *    - TIM2 Channel 1 is configured as an Output Compare channel:
+ *         * CC1S = 00 (output)
+ *         * OC1M = 110 (PWM mode 1) with preload enabled (OC1PE) and
+ *           ARR preload enabled (ARPE).
+ *    - TIM2->CCR1 holds the pulse width in timer ticks; it is updated
+ *      according to the current servo angle via map_angle_to_pulse().
+ *    - This generates a real hardware PWM signal (1–2 ms pulse width
+ *      within a 20 ms period), which directly drives the servo motor.
+ *
+ * 2) TIM2_CH2 -> Output Compare interrupt "time base" (no external pin)
+ *    - TIM2 Channel 2 is configured purely as an Output Compare channel:
+ *         * CC2S = 00 (output compare)
+ *         * OC2M = 000 (frozen mode – we only use the CC2IF event).
+ *    - TIM2->CCR2 is set so that CC2IF occurs once per timer period
+ *      (here CCR2 = 0 while CNT runs from 0 to ARR, every 20 ms).
+ *    - CC2 interrupt (CC2IE in DIER) is enabled and handled in
+ *      TIM2_IRQHandler.
+ *    - On every CC2IF (every 20 ms):
+ *         * If g_servo_delay_ticks > 0 and the servo sweep is not
+ *           started yet (g_servo_enabled == 0), the delay counter is
+ *           decremented. When it reaches zero, a single sweep
+ *           (0° -> 180° -> 0°) is armed and g_servo_enabled is set.
+ *         * If the servo sweep is active (g_servo_enabled == 1), the
+ *           servo angle g_servo_angle is stepped by SERVO_STEP_DEG on
+ *           each tick, the direction is reversed at the limits
+ *           (0° / 180°), and TIM2->CCR1 is updated with the new pulse
+ *           width via map_angle_to_pulse(). Once a full up-and-down
+ *           sweep is completed, g_servo_enabled is cleared.
+ *    - Thus TIM2_CH2 Output Compare provides a precise 20 ms time base
+ *      to implement both the auto-flush delay and the servo sweep logic.
+ *
+ * Summary
+ * ------------------------------------------------
+ * - REAL Input Capture:
+ *      * TIM15_CH1 on PA2 measures the time between "sit" and "stand"
+ *        events using hardware capture timestamps from CCR1
+ *        (both-edge capture + overcapture handling).
+ *
+ * - REAL Output Compare:
+ *      * TIM2_CH1 generates the servo PWM signal entirely through
+ *        hardware compare (CCR1 vs CNT in PWM mode 1).
+ *      * TIM2_CH2 generates periodic compare events (CC2IF) that serve
+ *        as a 20 ms tick driving the delay counter and servo motion
+ *        state machine.
+ */
+
 #include <stdint.h>
 
 // ===================== System Parameters =====================
@@ -16,6 +83,10 @@
 #define TIM2_PSC_VAL      3
 #define TIM2_ARR_VAL      19999 // For a 20 ms period we need 20000 counts
 #define TIM2_PERIOD_MS    20u   // 20 ms period with these PSC/ARR settings
+
+// TIM15 parameters for input capture
+#define TIM15_PSC_VAL     3999   // 1 MHz timer clock (1 µs resolution)
+#define TIM15_ARR_VAL     0xFFFF // 16-bit timer
 
 // Servo pulse widths in timer ticks (1 tick = 1 µs at 1 MHz)
 #define SERVO_MIN_PULSE   1000  // 1000 µs = 1 ms  (0 degrees)
@@ -114,7 +185,7 @@ typedef struct {
 #define TIM15_IRQN                   69        // TIM15 global interrupt = IRQ 69
 #define TIM15_IRQ_BIT  (TIM15_IRQN - 64)       // 5
 
-#define TIM2_IRQN                    45        // TIM2 global interrupt = IRQ 45
+#define TIM2_IRQN                   45         // TIM2 global interrupt = IRQ 45
 #define TIM2_IRQ_BIT   (TIM2_IRQN - 32)        // 13
 
 // ===================== Global IC state =====================
@@ -185,8 +256,8 @@ static void init_TIM15(void)
 {
     RCC_APB2ENR |= (1u << 16); // Enable TIM15 clock
 
-    TIM15->PSC = 3999;      // 4 MHz / (3999 + 1) = 1 kHz -> 1 ms per tick
-    TIM15->ARR = 0xFFFF;    // ~65 s max measurement window
+    TIM15->PSC = TIM15_PSC_VAL;     // 4 MHz / (3999 + 1) = 1 kHz -> 1 ms per tick
+    TIM15->ARR = TIM15_ARR_VAL;    // ~65 s max measurement window
 
     // CHANNEL 1 as Input Capture on TI1
     TIM15->CCMR1 &= ~(3u << 0); // Clear CC1S bits
