@@ -1,0 +1,379 @@
+#include <stdint.h>
+
+// ===================== System Parameters =====================
+#define OCCUPIED_THRESHOLD_SEC      2  // seconds seated to confirm usage
+#define SECOND_LED_DELAY_SEC        4  // delay after standing up (not used yet)
+
+// IR / LED pins
+#define IR_INPUT_PIN   2  // PA2
+#define RED_LED_PIN    9  // PA9
+#define BLUE_LED_PIN   7  // PB7
+
+// Servo pin
+#define SERVO_SIGNAL_PIN  0     // PA0
+
+// TIM2 parameters for servo PWM
+#define TIM2_PSC_VAL      3
+#define TIM2_ARR_VAL      19999 // For a 20 ms period we need 20000 counts
+
+// Servo pulse widths in timer ticks (1 tick = 1 µs at 1 MHz)
+#define SERVO_MIN_PULSE   1000  // 1000 µs = 1 ms  (0 degrees)
+#define SERVO_MAX_PULSE   2000  // 2000 µs = 2 ms  (180 degrees)
+
+#define SERVO_MIN_ANGLE   0     // Servo angle limits
+#define SERVO_MAX_ANGLE   180
+
+#define SERVO_STEP_DEG    1     // Angular step per OC event -> 1 degree / 20 ms -> ~50°/s
+
+// ===================== Peripheral Structures =====================
+typedef struct {
+    volatile uint32_t MODER;
+    volatile uint32_t OTYPER;
+    volatile uint32_t OSPEEDR;
+    volatile uint32_t PUPDR;
+    volatile uint32_t IDR;
+    volatile uint32_t ODR;
+    volatile uint32_t BSRR;
+    volatile uint32_t LCKR;
+    volatile uint32_t AFRL;
+    volatile uint32_t AFRH;
+    volatile uint32_t BRR;
+    uint32_t reserved;
+    volatile uint32_t SECCFGR;
+} GPIO;
+
+// TIM15 Structure (from reference)
+typedef struct {
+    volatile uint32_t CR1;        // 0x00
+    volatile uint32_t CR2;        // 0x04
+    volatile uint32_t SMCR;       // 0x08
+    volatile uint32_t DIER;       // 0x0C
+    volatile uint32_t SR;         // 0x10
+    volatile uint32_t EGR;        // 0x14
+    volatile uint32_t CCMR1;      // 0x18
+    uint32_t reserved1;           // 0x1C
+    volatile uint32_t CCER;       // 0x20
+    volatile uint32_t CNT;        // 0x24
+    volatile uint32_t PSC;        // 0x28
+    volatile uint32_t ARR;        // 0x2C
+    volatile uint32_t RCR;        // 0x30
+    volatile uint32_t CCR1;       // 0x34
+    volatile uint32_t CCR2;       // 0x38
+    uint32_t reserved2[2];        // 0x3C, 0x40
+    volatile uint32_t BDTR;       // 0x44
+    volatile uint32_t DCR;        // 0x48
+    volatile uint32_t DMAR;       // 0x4C
+    volatile uint32_t OR1;        // 0x50
+    uint32_t reserved3[3];        // 0x54, 0x58, 0x5C
+    volatile uint32_t OR2;        // 0x60
+} TIM15_General_Purpose_Type;
+
+// TIM2/3/4/5 Structure (32-bit General-Purpose Timer)
+typedef struct {
+    volatile uint32_t CR1;        // 0x00
+    volatile uint32_t CR2;        // 0x04
+    volatile uint32_t SMCR;       // 0x08
+    volatile uint32_t DIER;       // 0x0C
+    volatile uint32_t SR;         // 0x10
+    volatile uint32_t EGR;        // 0x14
+    volatile uint32_t CCMR1;      // 0x18
+    volatile uint32_t CCMR2;      // 0x1C
+    volatile uint32_t CCER;       // 0x20
+    volatile uint32_t CNT;        // 0x24 (32-bit)
+    volatile uint32_t PSC;        // 0x28
+    volatile uint32_t ARR;        // 0x2C (32-bit)
+    uint32_t reserved1;           // 0x30
+    volatile uint32_t CCR1;       // 0x34 (32-bit)
+    volatile uint32_t CCR2;       // 0x38 (32-bit)
+    volatile uint32_t CCR3;       // 0x3C (32-bit)
+    volatile uint32_t CCR4;       // 0x40 (32-bit)
+    uint32_t reserved2;           // 0x44
+    volatile uint32_t DCR;        // 0x48
+    volatile uint32_t DMAR;       // 0x4C
+} TIM_General_Purpose_32bit_Type;
+
+// ===================== Base addresses =====================
+#define RCC_AHB2ENR   (*(volatile uint32_t *) 0x4002104C) // for GPIOA/B/C... clocks enable
+#define RCC_APB2ENR   (*(volatile uint32_t *) 0x40021060) // for TIM15... clocks enable
+#define RCC_APB1ENR1  (*(volatile uint32_t *) 0x40021058) // for TIM2/3/4/5... clocks enable
+
+#define GPIOA ((GPIO *) 0x42020000)
+#define GPIOB ((GPIO *) 0x42020400)
+
+#define TIM15 ((TIM15_General_Purpose_Type *) 0x40014000)
+#define TIM2  ((TIM_General_Purpose_32bit_Type *) 0x40000000)
+
+// NVIC ISER registers
+#define ISER1         (*(volatile uint32_t *) 0xE000E104)  // NVIC ISER1 -> IRQ 32..63
+#define ISER2         (*(volatile uint32_t *) 0xE000E108)  // NVIC ISER2 -> IRQ 64..95
+
+#define TIM15_IRQN                   69        // TIM15 global interrupt = IRQ 69
+#define TIM15_IRQ_BIT  (TIM15_IRQN - 64)       // 5
+
+#define TIM2_IRQN                    45        // TIM2 global interrupt = IRQ 45
+#define TIM2_IRQ_BIT   (TIM2_IRQN - 32)        // 13
+
+// ===================== Global IC state =====================
+static uint8_t  is_sitting         = 0; // 0: nobody sitting, 1: someone sitting
+static uint32_t sit_start_time_ms  = 0;
+static const uint32_t OCCUPIED_THRESHOLD_MS = OCCUPIED_THRESHOLD_SEC * 1000u;
+
+// ===================== Global Servo State =====================
+static volatile int g_servo_angle    = 0;   // Current angle (0..180)
+static volatile int g_servo_dir      = 1;   // 1: increasing, -1: decreasing
+static volatile uint8_t g_servo_enabled = 0; // 0: idle, 1: move "like OC part"
+
+// ===================== LED Control Functions =====================
+static void turn_on_RED(void)  { GPIOA->ODR |=  (1u << RED_LED_PIN); }
+static void turn_off_RED(void) { GPIOA->ODR &= ~(1u << RED_LED_PIN); }
+static void turn_on_BLUE(void) { GPIOB->ODR |=  (1u << BLUE_LED_PIN); }
+static void turn_off_BLUE(void){ GPIOB->ODR &= ~(1u << BLUE_LED_PIN); }
+
+// ===================== Helper: Map servo angle to pulse width =====================
+static uint32_t map_angle_to_pulse(int angle)
+{
+    if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
+    if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+
+    // Linear mapping: (angle * (SERVO_MAX_PULSE - SERVO_MIN_PULSE)) / 180 + SERVO_MIN_PULSE
+    return (uint32_t)(((int32_t)angle * (SERVO_MAX_PULSE - SERVO_MIN_PULSE)) / 180
+                      + SERVO_MIN_PULSE);
+}
+
+// ===================== GPIO Setup (LED + IR + Servo) =====================
+static void init_GPIO(void)
+{
+    // Enable GPIOA, GPIOB clock
+    RCC_AHB2ENR |= (0b11u << 0);
+
+    // ---- LEDs ----
+    // PA9 -> RED LED, output
+    GPIOA->MODER &= ~(0b11u << (RED_LED_PIN * 2));
+    GPIOA->MODER |=  (0b01u << (RED_LED_PIN * 2));
+
+    // PB7 -> BLUE LED, output
+    GPIOB->MODER &= ~(0b11u << (BLUE_LED_PIN * 2));
+    GPIOB->MODER |=  (0b01u << (BLUE_LED_PIN * 2));
+
+    // ---- IR Input Capture Pin ----
+    // 1. Set PA2 to Alternate Function mode
+    GPIOA->MODER &= ~(0b11u << (IR_INPUT_PIN * 2));
+    GPIOA->MODER |=  (0b10u << (IR_INPUT_PIN * 2)); // AF mode
+    // 2. Select AF14 (TIM15_CH1) for PA2
+    GPIOA->AFRL &= ~(0xFu << (IR_INPUT_PIN * 4));
+    GPIOA->AFRL |=  (0xEu << (IR_INPUT_PIN * 4));   // AF14
+
+    // ---- Servo PWM Pin ----
+    // PA0 -> TIM2_CH1 (AF1)
+    GPIOA->MODER &= ~(0b11u << (SERVO_SIGNAL_PIN * 2));
+    GPIOA->MODER |=  (0b10u << (SERVO_SIGNAL_PIN * 2)); // AF mode
+
+    GPIOA->OSPEEDR |= (0b11u << (SERVO_SIGNAL_PIN * 2)); // High speed
+
+    GPIOA->AFRL &= ~(0xFu << (SERVO_SIGNAL_PIN * 4));
+    GPIOA->AFRL |=  (0x1u << (SERVO_SIGNAL_PIN * 4));    // AF1 = TIM2_CH1
+}
+
+// ===================== TIM15 Input Capture Setup =====================
+static void init_TIM15(void)
+{
+    RCC_APB2ENR |= (1u << 16); // Enable TIM15 clock
+
+    TIM15->PSC = 3999;      // 4 MHz / (3999 + 1) = 1 kHz -> 1 ms per tick
+    TIM15->ARR = 0xFFFF;    // ~65 s max measurement window
+
+    // CHANNEL 1 as Input Capture on TI1
+    TIM15->CCMR1 &= ~(3u << 0); // Clear CC1S bits
+    TIM15->CCMR1 |=  (1u << 0); // CC1S = 01: input, mapped on TI1
+
+    // Both edges capture
+    TIM15->CCER &= ~(0xFu);     // Clear CC1P, CC1E etc.
+    TIM15->CCER |=  0b1011u;    // CC1P=10, CC1E=11 -> both edges
+
+    // Enable interrupt for CH1
+    TIM15->DIER |= (1u << 1);   // CC1IE
+
+    TIM15->SR = 0;              // Clear all flags
+
+    // Enable TIM15 interrupt in NVIC
+    ISER2 |= (1u << TIM15_IRQ_BIT);
+
+    // Start counter
+    TIM15->CR1 |= 1u;           // CEN = 1
+}
+
+// ===================== TIM2 Servo PWM + OC Setup =====================
+static void init_TIM2(void)
+{
+    RCC_APB1ENR1 |= (1u << 0);   // Enable TIM2 clock
+
+    TIM2->CR1 &= ~(1u << 0);     // Stop timer while configuring -> CEN = 0
+
+    TIM2->PSC = TIM2_PSC_VAL;    // 1 MHz timer clock (assuming 4 MHz base)
+    TIM2->ARR = TIM2_ARR_VAL;    // 20 ms period
+
+    // Initial global servo state
+    g_servo_angle   = 0;   // Start at 0 degrees
+    g_servo_dir     = 1;   // Increasing
+    g_servo_enabled = 0;   // Servo idle at startup
+
+    // ------ CHANNEL 1: PWM output to servo ------
+    // 1. CH1 as output compare
+    TIM2->CCMR1 &= ~(3u << 0);   // CC1S = 00 -> output
+
+    // 2. PWM mode 1
+    TIM2->CCMR1 &= ~(0b111u << 4);
+    TIM2->CCMR1 |=  (0b110u << 4); // OC1M = 110: PWM mode 1
+
+    // 3. Enable preload for CCR1
+    TIM2->CCMR1 |= (1u << 3);   // OC1PE
+
+    // 4. Enable ARR preload
+    TIM2->CR1 |= (1u << 7);     // ARPE
+
+    // 5. Enable CH1 output
+    TIM2->CCER |= (1u << 0);    // CC1E
+
+    // 6. Initial pulse width for CH1 (0 deg)
+    TIM2->CCR1 = map_angle_to_pulse(g_servo_angle);
+
+    // ------ CHANNEL 2: OC just for timing / interrupts ------
+    // 1. CH2 as output compare
+    TIM2->CCMR1 &= ~(3u << 8);  // CC2S = 00 -> output compare
+
+    // 2. Frozen mode (we only want CC2IF event)
+    TIM2->CCMR1 &= ~(0b111u << 12); // OC2M = 000
+
+    // 3. CCR2: CC2IF set each time CNT reaches this value
+    TIM2->CCR2 = 0;             // Interrupt every period (CNT wraps)
+
+    // 4. Enable CH2 output (even if not mapped to pin)
+    TIM2->CCER |= (1u << 4);    // CC2E
+
+    // 5. Enable interrupt for CH2
+    TIM2->DIER |= (1u << 2);    // CC2IE
+
+    TIM2->SR = 0;               // Clear flags
+
+    // Generate update event to load PSC/ARR/CCRx
+    TIM2->EGR |= (1u << 0);     // UG
+
+    // Enable TIM2 interrupt in NVIC
+    ISER1 |= (1u << TIM2_IRQ_BIT);
+
+    // Start timer
+    TIM2->CR1 |= (1u << 0);     // CEN = 1
+}
+
+// ===================== TIM15 Interrupt Handler (Input Capture) =====================
+void TIM15_IRQHandler(void)
+{
+    // Input Capture Channel 1 interrupt
+    if (TIM15->SR & (1u << 1)) {         // CC1IF
+        TIM15->SR &= ~(1u << 1);         // Clear CC1IF
+
+        uint32_t captured_time_ms = TIM15->CCR1; // captured time (ms)
+        uint8_t level_now = (GPIOA->IDR & (1u << IR_INPUT_PIN)) ? 1u : 0u;
+        // level_now == 0 -> pin LOW  -> someone sitting
+        // level_now == 1 -> pin HIGH -> someone standing up
+
+        if (level_now == 0u) {          // Sitting now (FALLING edge)
+            if (!is_sitting) {          // Previously empty -> new sit
+                is_sitting        = 1u;
+                sit_start_time_ms = captured_time_ms;
+
+                turn_off_RED();
+                turn_off_BLUE();
+                // When someone sits, keep servo idle for now.
+                g_servo_enabled = 0u;
+            }
+            // else -> bouncing while already sitting: ignore
+        } else {                        // Standing up now (RISING edge)
+            if (is_sitting) {           // Previously sitting -> real stand up
+                is_sitting = 0u;
+                uint32_t sit_end_time_ms = captured_time_ms;
+                uint32_t elapsed_ms;
+
+                if (sit_end_time_ms >= sit_start_time_ms) {
+                    elapsed_ms = sit_end_time_ms - sit_start_time_ms;
+                } else {
+                    // Timer overflowed
+                    elapsed_ms = (TIM15->ARR + 1u) - sit_start_time_ms + sit_end_time_ms;
+                }
+
+                turn_on_RED();
+
+                if (elapsed_ms >= OCCUPIED_THRESHOLD_MS) {
+                    // Valid sit -> BLUE LED ON + start servo motion
+                    turn_on_BLUE();
+                    g_servo_enabled = 1u;  // Start sweeping servo "like OC part"
+                } else {
+                    // Temporary contact, not a valid sit
+                    turn_off_BLUE();
+                    g_servo_enabled = 0u;  // Make sure servo stays idle
+                }
+            }
+            // else -> bouncing while already empty: ignore
+        }
+    }
+
+    // Overcapture Event
+    if (TIM15->SR & (1u << 9)) {        // CC1OF
+        TIM15->SR &= ~(1u << 9);        // Clear CC1OF
+        // Reset state for safety
+        is_sitting = 0u;
+        turn_off_BLUE();
+        turn_on_RED();
+        g_servo_enabled = 0u;           // Stop servo on error
+    }
+}
+
+// ===================== TIM2 Interrupt Handler (Servo motion) =====================
+void TIM2_IRQHandler(void)
+{
+    // Output Compare Channel 2 interrupt
+    if (TIM2->SR & (1u << 2)) {      // CC2IF
+        TIM2->SR &= ~(1u << 2);      // Clear CC2IF
+
+        if (g_servo_enabled) {
+            // Same motion logic as original OC part
+            g_servo_angle += (g_servo_dir * SERVO_STEP_DEG);
+
+            if (g_servo_angle >= SERVO_MAX_ANGLE) {
+                g_servo_angle = SERVO_MAX_ANGLE;
+                g_servo_dir   = -1;  // Reverse at max
+            } else if (g_servo_angle <= SERVO_MIN_ANGLE) {
+                g_servo_angle = SERVO_MIN_ANGLE;
+                g_servo_dir   = 1;   // Reverse at min
+            }
+
+            // Update PWM duty for new angle
+            TIM2->CCR1 = map_angle_to_pulse(g_servo_angle);
+        }
+    }
+
+    // Update Interrupt Flag (not strictly needed but kept clean)
+    if (TIM2->SR & (1u << 0)) {      // UIF
+        TIM2->SR &= ~(1u << 0);
+    }
+}
+
+// ===================== MAIN =====================
+int main(void)
+{
+    init_GPIO();   // LEDs, IR (TIM15_CH1), Servo (TIM2_CH1)
+    init_TIM15();  // Input Capture for IR
+    init_TIM2();   // Servo PWM + OC
+
+    // Global interrupt enable
+    __asm volatile(
+        "mov r0, #0      \n\t"
+        "msr primask, r0 \n\t"
+    );
+
+    while (1) {
+        __asm volatile("wfi");
+    }
+
+    return 0;
+}
