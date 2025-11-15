@@ -2,7 +2,8 @@
 
 // ===================== System Parameters =====================
 #define OCCUPIED_THRESHOLD_SEC      2  // seconds seated to confirm usage
-#define SECOND_LED_DELAY_SEC        4  // delay after standing up (not used yet)
+#define SECOND_LED_DELAY_SEC        4  // (not used yet)
+#define AUTO_FLUSH_DELAY_SEC        4  // delay AFTER valid sit & stand-up before servo starts
 
 // IR / LED pins
 #define IR_INPUT_PIN   2  // PA2
@@ -15,6 +16,7 @@
 // TIM2 parameters for servo PWM
 #define TIM2_PSC_VAL      3
 #define TIM2_ARR_VAL      19999 // For a 20 ms period we need 20000 counts
+#define TIM2_PERIOD_MS    20u   // 20 ms period with these PSC/ARR settings
 
 // Servo pulse widths in timer ticks (1 tick = 1 µs at 1 MHz)
 #define SERVO_MIN_PULSE   1000  // 1000 µs = 1 ms  (0 degrees)
@@ -24,6 +26,9 @@
 #define SERVO_MAX_ANGLE   180
 
 #define SERVO_STEP_DEG    1     // Angular step per OC event -> 1 degree / 20 ms -> ~50°/s
+
+// How many TIM2 periods to wait before starting servo sweep
+#define AUTO_FLUSH_DELAY_TICKS  ((AUTO_FLUSH_DELAY_SEC * 1000u) / TIM2_PERIOD_MS)
 
 // ===================== Peripheral Structures =====================
 typedef struct {
@@ -119,9 +124,11 @@ static uint32_t sit_start_time_ms  = 0;
 static const uint32_t OCCUPIED_THRESHOLD_MS = OCCUPIED_THRESHOLD_SEC * 1000u;
 
 // ===================== Global Servo State =====================
-static volatile int g_servo_angle    = 0;   // Current angle (0..180)
-static volatile int g_servo_dir      = 1;   // 1: increasing, -1: decreasing
-static volatile uint8_t g_servo_enabled = 0; // 0: idle, 1: move "like OC part"
+static volatile int      g_servo_angle        = 0;   // Current angle (0..180)
+static volatile int      g_servo_dir          = 1;   // 1: increasing, -1: decreasing
+static volatile uint8_t  g_servo_enabled      = 0;   // 1 while sweep is running
+static volatile uint8_t  g_servo_reached_max  = 0;   // 1 after reaching 180° in current sweep
+static volatile uint32_t g_servo_delay_ticks  = 0;   // countdown (TIM2 periods) before starting sweep
 
 // ===================== LED Control Functions =====================
 static void turn_on_RED(void)  { GPIOA->ODR |=  (1u << RED_LED_PIN); }
@@ -212,10 +219,12 @@ static void init_TIM2(void)
     TIM2->PSC = TIM2_PSC_VAL;    // 1 MHz timer clock (assuming 4 MHz base)
     TIM2->ARR = TIM2_ARR_VAL;    // 20 ms period
 
-    // Initial global servo state
-    g_servo_angle   = 0;   // Start at 0 degrees
-    g_servo_dir     = 1;   // Increasing
-    g_servo_enabled = 0;   // Servo idle at startup
+    // Initial global servo state (idle at 0 degrees)
+    g_servo_angle        = SERVO_MIN_ANGLE;
+    g_servo_dir          = 1;
+    g_servo_enabled      = 0;
+    g_servo_reached_max  = 0;
+    g_servo_delay_ticks  = 0;
 
     // ------ CHANNEL 1: PWM output to servo ------
     // 1. CH1 as output compare
@@ -245,7 +254,7 @@ static void init_TIM2(void)
     TIM2->CCMR1 &= ~(0b111u << 12); // OC2M = 000
 
     // 3. CCR2: CC2IF set each time CNT reaches this value
-    TIM2->CCR2 = 0;             // Interrupt every period (CNT wraps)
+    TIM2->CCR2 = 0;             // Interrupt every period (CNT wraps at ARR)
 
     // 4. Enable CH2 output (even if not mapped to pin)
     TIM2->CCER |= (1u << 4);    // CC2E
@@ -284,8 +293,11 @@ void TIM15_IRQHandler(void)
 
                 turn_off_RED();
                 turn_off_BLUE();
-                // When someone sits, keep servo idle for now.
-                g_servo_enabled = 0u;
+
+                // Stop any ongoing or pending flush when someone sits
+                g_servo_enabled      = 0u;
+                g_servo_reached_max  = 0u;
+                g_servo_delay_ticks  = 0u;
             }
             // else -> bouncing while already sitting: ignore
         } else {                        // Standing up now (RISING edge)
@@ -304,13 +316,24 @@ void TIM15_IRQHandler(void)
                 turn_on_RED();
 
                 if (elapsed_ms >= OCCUPIED_THRESHOLD_MS) {
-                    // Valid sit -> BLUE LED ON + start servo motion
+                    // Valid sit -> BLUE LED ON immediately
+                    // but servo should start AFTER AUTO_FLUSH_DELAY_SEC
                     turn_on_BLUE();
-                    g_servo_enabled = 1u;  // Start sweeping servo "like OC part"
+
+                    // Prepare servo at 0° but DO NOT start yet
+                    g_servo_angle        = SERVO_MIN_ANGLE;
+                    g_servo_dir          = 1;
+                    g_servo_reached_max  = 0;
+                    g_servo_enabled      = 0;
+                    g_servo_delay_ticks  = AUTO_FLUSH_DELAY_TICKS;
+
+                    TIM2->CCR1 = map_angle_to_pulse(g_servo_angle);
                 } else {
                     // Temporary contact, not a valid sit
                     turn_off_BLUE();
-                    g_servo_enabled = 0u;  // Make sure servo stays idle
+                    g_servo_enabled      = 0u;
+                    g_servo_reached_max  = 0u;
+                    g_servo_delay_ticks  = 0u;
                 }
             }
             // else -> bouncing while already empty: ignore
@@ -324,27 +347,53 @@ void TIM15_IRQHandler(void)
         is_sitting = 0u;
         turn_off_BLUE();
         turn_on_RED();
-        g_servo_enabled = 0u;           // Stop servo on error
+        g_servo_enabled      = 0u;
+        g_servo_reached_max  = 0u;
+        g_servo_delay_ticks  = 0u;
     }
 }
 
-// ===================== TIM2 Interrupt Handler (Servo motion) =====================
+// ===================== TIM2 Interrupt Handler (Servo motion + delay) =====================
 void TIM2_IRQHandler(void)
 {
-    // Output Compare Channel 2 interrupt
+    // Output Compare Channel 2 interrupt (our 20 ms "tick")
     if (TIM2->SR & (1u << 2)) {      // CC2IF
         TIM2->SR &= ~(1u << 2);      // Clear CC2IF
 
+        // 1) Handle delayed start of servo sweep
+        if (!g_servo_enabled && g_servo_delay_ticks > 0u) {
+            g_servo_delay_ticks--;
+            if (g_servo_delay_ticks == 0u) {
+                // Start ONE sweep 0° -> 180° -> 0°
+                g_servo_angle        = SERVO_MIN_ANGLE;
+                g_servo_dir          = 1;
+                g_servo_reached_max  = 0;
+                g_servo_enabled      = 1;
+                TIM2->CCR1 = map_angle_to_pulse(g_servo_angle);
+            }
+        }
+
+        // 2) Handle active sweep motion
         if (g_servo_enabled) {
-            // Same motion logic as original OC part
+            // Move by one step
             g_servo_angle += (g_servo_dir * SERVO_STEP_DEG);
 
-            if (g_servo_angle >= SERVO_MAX_ANGLE) {
-                g_servo_angle = SERVO_MAX_ANGLE;
-                g_servo_dir   = -1;  // Reverse at max
-            } else if (g_servo_angle <= SERVO_MIN_ANGLE) {
+            if (g_servo_dir > 0 && g_servo_angle >= SERVO_MAX_ANGLE) {
+                // Hit max -> clamp and start moving back
+                g_servo_angle       = SERVO_MAX_ANGLE;
+                g_servo_dir         = -1;
+                g_servo_reached_max = 1;
+            } else if (g_servo_dir < 0 && g_servo_angle <= SERVO_MIN_ANGLE) {
+                // Returned to min
                 g_servo_angle = SERVO_MIN_ANGLE;
-                g_servo_dir   = 1;   // Reverse at min
+
+                if (g_servo_reached_max) {
+                    // We already went up to max and came back -> ONE full sweep is done
+                    g_servo_enabled = 0;  // stop updating angle
+                } else {
+                    // Safety path, normally not used
+                    g_servo_dir = 1;
+                }
             }
 
             // Update PWM duty for new angle
