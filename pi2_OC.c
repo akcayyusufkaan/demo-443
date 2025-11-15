@@ -84,7 +84,7 @@ uint32_t map_angle_to_pulse(int angle)
 }
 
 // Servo PWM and Output Compare Setup
-void GPIO_setup(void)
+void init_GPIO(void)
 {
     RCC_AHB2ENR  |= (1 << 0);   // Enable GPIOA clock
 
@@ -98,7 +98,7 @@ void GPIO_setup(void)
     GPIOA->AFRL   |=  (0b0001 << (SERVO_SIGNAL_PIN * 4)); // AF1 = TIM2_CH1
 }
 
-void TIM2_setup(void)
+void init_TIM2(void)
 {
     RCC_APB1ENR1 |= (1 << 0);   // Enable TIM2 clock
 
@@ -196,8 +196,8 @@ void TIM2_IRQHandler(void)
 // MAIN
 int main(void)
 {
-    GPIO_setup(); // PA0 pin
-    TIM2_setup(); // OC + PWM
+    init_GPIO(); // PA0 pin
+    init_TIM2(); // OC + PWM
 
     // Global interrupt enable
     __asm volatile(

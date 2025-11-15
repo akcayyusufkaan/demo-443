@@ -69,8 +69,14 @@ static uint8_t  is_sitting         = 0; // 0: nobody sitting, 1: someone sitting
 static uint32_t sit_start_time_ms  = 0;
 static const uint32_t OCCUPIED_THRESHOLD_MS = OCCUPIED_THRESHOLD_SEC * 1000u;
 
+// LED Control Functions
+void turn_on_RED(void) { GPIOA->ODR |= (1 << RED_LED_PIN); }
+void turn_off_RED(void) { GPIOA->ODR &= ~(1 << RED_LED_PIN); }
+void turn_on_BLUE(void) { GPIOB->ODR |= (1 << BLUE_LED_PIN); }
+void turn_off_BLUE(void) { GPIOB->ODR &= ~(1 << BLUE_LED_PIN); }
+
 // GPIO Setup
-void GPIO_setup(void)
+void init_GPIO(void)
 {
     RCC_AHB2ENR |= (0b11 << 0);  // Enable GPIOA, GPIOB clock
 
@@ -89,7 +95,7 @@ void GPIO_setup(void)
 }
 
 // TIM15 Input Capture Setup
-void TIM15_setup(void)
+void init_TIM15(void)
 {
     RCC_APB2ENR |= (1u << 16); // Enable TIM15 clock
 
@@ -116,12 +122,6 @@ void TIM15_setup(void)
     // Start the counter
     TIM15->CR1 |= 1u;  // CEN = 1
 }
-
-// LED Control Functions
-void turn_on_RED(void) { GPIOA->ODR |= (1 << RED_LED_PIN); }
-void turn_off_RED(void) { GPIOA->ODR &= ~(1 << RED_LED_PIN); }
-void turn_on_BLUE(void) { GPIOB->ODR |= (1 << BLUE_LED_PIN); }
-void turn_off_BLUE(void) { GPIOB->ODR &= ~(1 << BLUE_LED_PIN); }
 
 // TIM15 Interrupt Handler
 void TIM15_IRQHandler(void)
@@ -187,8 +187,8 @@ void TIM15_IRQHandler(void)
 // MAIN
 int main(void)
 {
-    GPIO_setup();   // PA9 / PB7 LED + PA2 IC pins
-    TIM15_setup();  // IC + timer
+    init_GPIO();   // PA9 / PB7 LED + PA2 IC pins
+    init_TIM15();  // IC + timer
 
     // Global interrupt enable
     __asm volatile (
