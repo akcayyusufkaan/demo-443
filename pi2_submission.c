@@ -224,8 +224,8 @@ typedef struct {
 #define ISER2         (*(volatile uint32_t *) 0xE000E108)  // NVIC ISER2 -> IRQ 64..95
 #define TIM15_IRQN                   69        // TIM15 global interrupt = IRQ 69
 #define TIM15_IRQ_BIT  (TIM15_IRQN - 64)       // 5
-#define TIM2_IRQN                   45         // TIM2 global interrupt = IRQ 45
-#define TIM2_IRQ_BIT   (TIM2_IRQN - 32)        // 13
+#define TIM2_IRQN                    45        // TIM2 global interrupt = IRQ 45
+#define TIM2_IRQ_BIT    (TIM2_IRQN - 32)       // 13
 
 
 /* ===================== Motion Sensor GPIO Setup from PI1 ===================== */
@@ -267,6 +267,7 @@ void cover_motor_timer_initialize(void) {
 }
 
 /* ===================== GPIO Setup (LED + IR + Servo) from PI2 ===================== */
+// We used PS7 and PS8 code files.
 static void gpio_initialize(void)
 {
     // Enable GPIOA, GPIOB clock
@@ -301,6 +302,7 @@ static void gpio_initialize(void)
 }
 
 /* ===================== TIM15 Input Capture Setup from PI2 ===================== */
+// We used PS7 and PS8 code files.
 static void tim15_initialize(void)
 {
     RCC_APB2ENR |= (1u << 16); // Enable TIM15 clock
@@ -329,6 +331,7 @@ static void tim15_initialize(void)
 }
 
 /* ===================== TIM2 Servo PWM + OC Setup from PI2 ===================== */
+// We used PS7 and PS8 code files.
 static void tim2_initialize(void)
 {
     RCC_APB1ENR1 |= (1u << 0);   // Enable TIM2 clock
@@ -446,6 +449,7 @@ static inline void check_cover_cooldown(void){
 
 /* ===================== Helper functions from PI2 ===================== */
 // LED control helpers
+// We used PS1.
 static void turn_on_RED(void)  { GPIOA->ODR |=  (1u << RED_LED_PIN); }
 static void turn_off_RED(void) { GPIOA->ODR &= ~(1u << RED_LED_PIN); }
 static void turn_on_BLUE(void) { GPIOB->ODR |=  (1u << BLUE_LED_PIN); }
@@ -463,6 +467,7 @@ static uint32_t map_angle_to_pulse(int angle)
 }
 
 /* ===================== TIM15 Interrupt Handler (Input Capture) from PI2 ===================== */
+// We used PS7 and PS8 code files.
 void TIM15_IRQHandler(void)
 {
     // Input Capture Channel 1 interrupt
@@ -546,6 +551,7 @@ void TIM15_IRQHandler(void)
 }
 
 /* ===================== TIM2 Interrupt Handler (Servo motion + delay) from PI2 ===================== */
+// We used PS7 and PS8 code files.
 void TIM2_IRQHandler(void)
 {
     // Output Compare Channel 2 interrupt (our 20 ms "tick")
