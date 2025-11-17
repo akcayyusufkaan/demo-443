@@ -70,25 +70,25 @@
 */
 
 /* ===================== System Parameters from PI1 ===================== */
-#define LED_INPUT_PIN         5  // PA5
-#define LED_OUTPUT_PIN        (LED_INPUT_PIN+1) // PA6
-#define COVER_INPUT_PIN       11  // PA11
+#define LED_INPUT_PIN         5                   // PA5
+#define LED_OUTPUT_PIN        (LED_INPUT_PIN+1)   // PA6
+#define COVER_INPUT_PIN       11                  // PA11
 #define COVER_OUTPUT_PIN      (COVER_INPUT_PIN+1) // PA12
 
-#define LED_ON_SEC                  1 //
-#define OCCUPIED_THRESHOLD_SEC      1  // seconds seated to confirm usage
-#define AUTO_FLUSH_DELAY_SEC        1  // delay after standing up (auto flush)
+#define LED_ON_SEC                  1  // seconds light remains ON after turn off switch
 #define COVER_COOLDOWN_SEC          7  // MIN time between cover rotations
-#define WATER_LEVEL_HIGH_MM       150 // mm from bottom
-#define MOTOR_RUNNING_SEC           1  // cover motor running time
+#define MOTOR_RUNNING_SEC           3  // cover motor running time
+#define OCCUPIED_THRESHOLD_SEC      10 // seconds seated to confirm usage
+#define AUTO_FLUSH_DELAY_SEC        5  // delay after standing up (auto flush)
+#define WATER_LEVEL_HIGH_MM       150  // mm from bottom
 
 /* ===================== System Parameters from PI2 ===================== */
 // IR / LED pins
-#define IR_INPUT_PIN   2        // PA2
-#define RED_LED_PIN    9        // PA9
-#define BLUE_LED_PIN   7        // PB7
+#define IR_INPUT_PIN         2        // PA2
+#define RED_LED_PIN          9        // PA9
+#define BLUE_LED_PIN         7        // PB7
 // Servo pin
-#define SERVO_SIGNAL_PIN  0     // PA0
+#define SERVO_SIGNAL_PIN     0     // PA0
 // TIM2 parameters for servo PWM
 #define TIM2_PSC_VAL      3
 #define TIM2_ARR_VAL      19999 // For a 20 ms period we need 20000 counts
@@ -101,7 +101,7 @@
 #define SERVO_MAX_PULSE   2000  // 2000 µs = 2 ms  (90 degrees)
 #define SERVO_MIN_ANGLE   0     // Servo angle limits
 #define SERVO_MAX_ANGLE   65
-#define SERVO_STEP_DEG    4     // Angular step per OC event -> ~100°/s
+#define SERVO_STEP_DEG    4     // Angular step per OC event
 // How many TIM2 periods to wait before starting servo sweep
 #define AUTO_FLUSH_DELAY_TICKS     ((AUTO_FLUSH_DELAY_SEC * 1000u) / TIM2_PERIOD_MS)
 // Delay between two sweeps (2 second)
@@ -110,17 +110,17 @@
 
 
 /* ===================== Global System State from PI1 ===================== */
-int g_light_sensor = 0;      // 0 dark, 1 light
+int g_light_sensor = 0;       // 0 dark, 1 light
 int g_light_time = 0;         // accumulated light seconds
 int g_cover_cooldown = 0;     // cover rotation rate-limit
 int g_cover_state=0;          // 0:closed,1:open
 
-/* ===================== Global IC state from PI2 ===================== */
-static uint8_t  is_sitting         = 0; // 0: nobody sitting, 1: someone sitting
-static uint32_t sit_start_time_ms  = 0;
+/* ===================== Global IC State from PI2 ===================== */
+static uint8_t  is_sitting                  = 0; // 0: nobody sitting, 1: someone sitting
+static uint32_t sit_start_time_ms           = 0;
 static const uint32_t OCCUPIED_THRESHOLD_MS = OCCUPIED_THRESHOLD_SEC * 1000u;
 
-/* ===================== Global servo state from PI2 ===================== */
+/* ===================== Global Servo State from PI2 ===================== */
 static volatile int      g_servo_angle            = 0;   // Current angle (0..90)
 static volatile int      g_servo_dir              = 1;   // 1: increasing, -1: decreasing
 static volatile uint8_t  g_servo_enabled          = 0;   // 1 while sweep is running
@@ -609,6 +609,7 @@ void TIM2_IRQHandler(void)
     }
 }
 
+/* ===================== Main ===================== */
 int main(void) {
     printf("Conceptual Design - SmartHygiene Toilet System\n");
 
