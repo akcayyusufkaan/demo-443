@@ -143,6 +143,13 @@
 #define INTER_SWEEP_DELAY_SEC      2
 #define INTER_SWEEP_DELAY_TICKS    ((INTER_SWEEP_DELAY_SEC * 1000u) / TIM2_PERIOD_MS)
 
+#define LPUART_TX_BUF_SIZE 1024
+
+volatile char     lpuart_tx_buf[LPUART_TX_BUF_SIZE]; //buffer to store the strings send by mc
+volatile uint16_t lpuart_tx_head = 0;   // next position to write
+volatile uint16_t lpuart_tx_tail = 0;   // next position to read
+
+
 
 /* ===================== Global System State from PI1 ===================== */
 int g_light_sensor = 0;       // 0 dark, 1 light
@@ -731,11 +738,28 @@ static inline void check_cover_cooldown(void){
 
 // --- Helper FUnctions From PI3 ---
 
-//Send char
-void LPUART1_SendChar(char c) {
-    while (!(LPUART1->ISR & (1 << 7))); // TWait for TXE
-    LPUART1->TDR = c;
+static inline uint16_t tx_next_index(uint16_t idx) {
+    return (uint16_t)((idx + 1U) % LPUART_TX_BUF_SIZE);
 }
+
+
+// Put one char into TX buffer and trigger TXE interrupt
+void LPUART1_SendChar(char c) {
+    uint16_t next = tx_next_index(lpuart_tx_head);
+
+    // If buffer is full, you can either block or drop.
+    // Simpler: block until there is space (short in practice).
+    while (next == lpuart_tx_tail) {
+        // buffer full, wait for ISR to send some bytes
+    }
+
+    lpuart_tx_buf[lpuart_tx_head] = c;
+    lpuart_tx_head = next;
+
+    // Enable TXE interrupt so ISR starts sending
+    LPUART1->CR1 |= (1 << 7);  // TXEIE = 1
+}
+
 
 // Sends a string by sending each char
 void LPUART1_SendString(char *str) {
@@ -771,19 +795,34 @@ void ADC1_2_IRQHandler(void)
 // We used PS9 and PS10 code files.
 
 void LPUART1_IRQHandler(void) {
-    // Check RXNE (data received?)
-    if (LPUART1->ISR & (1 << 5)) {
-        // Read received character (this also clears RXNE)
-        char received = (char)LPUART1->RDR;
+    uint32_t isr = LPUART1->ISR;
+    uint32_t cr1 = LPUART1->CR1;
 
-        // If 'W' or 'w' was pressed, set a flag
+    // ---------- RX: command interface ----------
+    if (isr & (1 << 5)) {  // RXNE flag
+        char received = (char)LPUART1->RDR;  // reading clears RXNE
+
         if (received == 'W' || received == 'w') {
             uart_print_water_flag = 1;
-        } else if (received == 'i' || received == 'I') {
+        } else if (received == 'I' || received == 'i') {
             uart_print_presence_flag = 1;
         }
     }
+
+    // ---------- TX: send next byte from buffer ----------
+    // TXE flag & TXE interrupt enabled?
+    if ((isr & (1 << 7)) && (cr1 & (1 << 7))) {  // TXE && TXEIE
+        if (lpuart_tx_head != lpuart_tx_tail) {
+            // There is data to send
+            LPUART1->TDR = (uint8_t)lpuart_tx_buf[lpuart_tx_tail];
+            lpuart_tx_tail = tx_next_index(lpuart_tx_tail);
+        } else {
+            // Buffer empty -> disable TXE interrupt
+            LPUART1->CR1 &= ~(1 << 7);  // TXEIE = 0
+        }
+    }
 }
+
 
 
 /* ===================== EXTI Interrupt Handler  from PI3 ===================== */
@@ -1069,7 +1108,7 @@ int main(void) {
     while(1){
 
 
-    	update();
+    	update(); // Handle updated Uart fumctions
 
         // Wait for interrupt from PI2
         __asm volatile("wfi");
