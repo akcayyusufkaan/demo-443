@@ -643,6 +643,7 @@ void ADC_initialize(void)
 
 
 	ADC1->SMPR1 &= ~(0b111 << 18); // Sampling time
+	ADC1->SMPR1 |= (0b111 << 18);
 
 	ADC1->SQR1 &=  ~(0b1111 << 0);
 	ADC1->SQR1 |= 6 << 6; // Channel 6
