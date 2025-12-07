@@ -671,21 +671,21 @@ void ADC_initialize(void)
 
 void LPUART1_initialize(void)
 {
-	// LPUART Clock ve GPIO Ayarları (Önceki kodunuzdaki PG7/PG8 ayarları)
+	// LPUART Clock and GPIO Settings
 	RCC_APB1ENR1 |= 1 << 28; // Power Clock
 	PWR_CR1 |= 1 << 14;
 	PWR_CR2 |= 1 << 9; // VDDIO2
 
 	RCC_AHB2ENR |= 1 << 6; // GPIOG Clock
 	GPIOG->MODER &= ~(0b0101 << (7 * 2));
-	GPIOG->MODER |= 0b1010 << (7 * 2); // Alt Function
+	GPIOG->MODER |= 0b1010 << (7 * 2); // G7 pin
 	GPIOG->AFRL &= ~(0b0111 << (7 * 4));
 	GPIOG->AFRL |= 0b1000 << (7 * 4); // AF8
 	GPIOG->AFRH &= ~0b0111;
 	GPIOG->AFRH |= 0b1000; // AF8
 
 	RCC_APB1ENR2 |= 1; // LPUART Clock Enable
-	LPUART1 -> BRR = 8888; // 115200 Baud (4MHz sysclk varsayımıyla)
+	LPUART1 -> BRR = 8888; // 115200 Baud (4MHz sysclk)
 	LPUART1->CR1 |= 1 << 29; // FIFO Enable
 	LPUART1->CR1 |= 0b11 << 2; // TE, RE Enable
 	LPUART1->CR1 |= 1 << 5; // RXNE Interrupt Enable
