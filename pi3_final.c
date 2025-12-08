@@ -98,9 +98,10 @@
        * Main loop is reduced to `update()` + `wfi`, and all real-time
          behavior (timers, EXTI, ADC, UART) is interrupt-driven.
 
-   - TIM16 / TIM17 IRQ handlers (GPO timing)
-       * TIM16 and TIM17 are used as simple general-purpose timers for
-         GPIO-related output timing (GPO).
+   - TIM6 / TIM7 IRQ handlers (GPO timing)
+       * TIM6 and TIM7 are used as simple  timers for
+         GPIO-related output timing (GPO). Adding the IRQ handlers for them removes the polling
+         mechanism from the main loop.
 */
 
 
@@ -113,8 +114,8 @@
 #define LED_ON_SEC                  7  // seconds light remains ON after turn off switch
 #define COVER_COOLDOWN_SEC          7  // MIN time between cover rotations
 #define MOTOR_RUNNING_SEC           3  // cover motor running time
-#define OCCUPIED_THRESHOLD_SEC      5 // seconds seated to confirm usage
-#define AUTO_FLUSH_DELAY_SEC        3  // delay after standing up (auto flush)
+#define OCCUPIED_THRESHOLD_SEC      10 // seconds seated to confirm usage
+#define AUTO_FLUSH_DELAY_SEC        5  // delay after standing up (auto flush)
 #define WATER_LEVEL_HIGH_MM       150  // mm from bottom
 
 /* ===================== System Parameters from PI2 ===================== */
@@ -145,7 +146,7 @@
 
 #define LPUART_TX_BUF_SIZE 1024
 
-volatile char     lpuart_tx_buf[LPUART_TX_BUF_SIZE]; //buffer to store the strings send by mc
+volatile char     lpuart_tx_buf[LPUART_TX_BUF_SIZE]; //buffer to store the strings send by microcontroller
 volatile uint16_t lpuart_tx_head = 0;   // next position to write
 volatile uint16_t lpuart_tx_tail = 0;   // next position to read
 
@@ -170,10 +171,12 @@ static volatile uint8_t  g_servo_reached_max      = 0;   // 1 after reaching 90Â
 static volatile uint32_t g_servo_delay_ticks      = 0;   // countdown (TIM2 periods) before next sweep
 static volatile uint8_t  g_servo_sweeps_remaining = 0;   // how many sweeps to perform
 
+
+/* ===================== Global States from P3 ===================== */
 volatile uint16_t water_level = 0; // digital value read by ADC
 volatile uint8_t uart_print_water_flag = 0; // flag  triggered by admin panel to sent water level
 volatile uint8_t uart_print_presence_flag = 0; // flag  triggered by admin panel to sent presence info
-volatile uint8_t adc_ready= 0;
+volatile uint8_t adc_ready= 0; // use for the interrupt of the ADC enable
 
 
 
@@ -388,20 +391,8 @@ typedef struct{
 #define PWR_CR1 *((volatile uint32_t *) 0x40007000)
 #define PWR_CR2 *((volatile uint32_t *) 0x40007004)
 
-int pulse = 0;
 
 
-// Map servo angle to pulse width
-static uint32_t map_angle_to_pulse(int angle)
-{
-    if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
-    if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
-
-    // Linear mapping: (angle * (SERVO_MAX_PULSE - SERVO_MIN_PULSE)) / 180 + SERVO_MIN_PULSE
-    pulse = (uint32_t)(((int32_t)angle * (SERVO_MAX_PULSE - SERVO_MIN_PULSE)) / 180
-                      + SERVO_MIN_PULSE);
-    return pulse;
-}
 
 /* ===================== Motion Sensor GPIO Setup from PI1 ===================== */
 void motion_sensor_initialize(void) {
@@ -435,6 +426,19 @@ void light_timer_initialize(void) {
     TIM6->CR1 |= 1;                             // CEN = 1: start counter
 
 
+
+}
+
+/* ===================== Helper Function from PI2 ===================== */
+// Map servo angle to pulse width
+static uint32_t map_angle_to_pulse(int angle)
+{
+    if (angle < SERVO_MIN_ANGLE) angle = SERVO_MIN_ANGLE;
+    if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+
+    // Linear mapping: (angle * (SERVO_MAX_PULSE - SERVO_MIN_PULSE)) / 180 + SERVO_MIN_PULSE
+    return (uint32_t)(((int32_t)angle * (SERVO_MAX_PULSE - SERVO_MIN_PULSE)) / 180
+                      + SERVO_MIN_PULSE);
 
 }
 
@@ -781,7 +785,7 @@ void LPUART1_SendString(char *str) {
 }
 
 // This function now prints a status string based on the water level value.
-void LPUART1_SendInteger(int num) {
+void LPUART1_SendWaterLevel(int num) {
     if (num <= 1600) {
         LPUART1_SendString("LOW"); // 0 - 1600
     } else if (num <= 1970) {
@@ -793,18 +797,17 @@ void LPUART1_SendInteger(int num) {
 
 /* ===================== ADC Interrupt Handler  from PI3 ===================== */
 // We used PS9 and PS10 code files.
-int debug =0;
+
 void ADC1_2_IRQHandler(void)
 {
 	if((ADC1->ISR & 1<<2) != 0)
 	{
-		water_level = ADC1->DR;
+		water_level = ADC1->DR;// store digital value
 		ADC1->CR |= 1<<2; // start new conversion
 	}
 
     // ADC ready (ADRDY) â€“ happens once after enabling ADC
     if ((ADC1->ISR & 1) != 0) {
-    	debug =2;
         ADC1->ISR |= 1;           // clear ADRDY
         ADC1->IER &= ~1;          // disable ADRDY interrupt
         ADC1->IER |= 1 << 2;      // enable EOC interrupt
@@ -903,7 +906,7 @@ void TIM7_IRQHandler(void)
     TIM7->SR = 0;
 
 
-	if (adc_ready !=0){
+	if (adc_ready !=0){// TIM7 also used for initializiation of the TIM7
 
 
 		//while((ADC1->CR & (1 << 31)) != 0) {}
@@ -1100,8 +1103,8 @@ void update(void){
     if (uart_print_water_flag) {
         uart_print_water_flag = 0;      // Clear request flag
 
-        LPUART1_SendString("\r\nWater Level: ");
-        LPUART1_SendInteger(water_level); // Print LOW / MEDIUM / HIGH
+        LPUART1_SendString("\r\n Water Level: ");
+        LPUART1_SendWaterLevel(water_level); // Print LOW / MEDIUM / HIGH
         LPUART1_SendString("\r\n");
 
     // Check if PC requested occupancy status
